@@ -135,4 +135,4 @@ The other insight: referencing Security Groups by ID instead of CIDR is far more
 
 Transitioning into AWS Solutions Architecture with a background in Information Security. My focus is designing environments that are hard to compromise — not just functional ones.
 
-[LinkedIn](https://linkedin.com/in/your-profile) • [GitHub](https://github.com/your-username)
+[LinkedIn](https://www.linkedin.com/in/tiagopmadeira/) • [GitHub](https://github.com/tiagoplaton)
