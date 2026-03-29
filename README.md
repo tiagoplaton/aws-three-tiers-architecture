@@ -13,6 +13,7 @@ The project covers VPC design, function-based subnet segmentation, layered ALBs,
 ## Architecture Diagram
 
 > Add your architecture diagram image here.
+> `![Architecture](./diagram.png)`
 
 ---
 
@@ -29,8 +30,9 @@ The project covers VPC design, function-based subnet segmentation, layered ALBs,
 | Private Subnet B | 10.0.4.0/24 | App tier — AZ us-east-1b |
 | Isolated Subnet A | 10.0.5.0/24 | Data tier — AZ us-east-1a |
 | Isolated Subnet B | 10.0.6.0/24 | Data tier — AZ us-east-1b |
-| Internet Gateway | — | Internet access for public subnets |
-| NAT Gateway | Public Subnet A | Controlled outbound for private subnets |
+| Internet Gateway | — | Attached to VPC boundary — internet access for public subnets |
+| NAT Gateway (AZ-A) | Public Subnet A | Controlled outbound for private subnets in AZ-A |
+| NAT Gateway (AZ-B) | Public Subnet B | Controlled outbound for private subnets in AZ-B |
 
 ### Tier 1 — Web (Public)
 
@@ -38,11 +40,13 @@ The only entry point into the application is the external ALB, protected by WAF.
 
 ### Tier 2 — Application (Private)
 
-No public IP, no inbound route from the internet. The only way to reach this tier is through the internal ALB. Outbound traffic for updates and integrations goes through the NAT Gateway, keeping these servers invisible to the outside world.
+No public IP, no inbound route from the internet. The only way to reach this tier is through the internal ALB. Outbound traffic for updates and integrations goes through each AZ's own NAT Gateway, so a failure in AZ-A doesn't affect outbound connectivity in AZ-B.
 
 ### Tier 3 — Data (Isolated)
 
-The data subnet has no internet route — inbound or outbound. RDS only accepts connections from the app servers' Security Group, on the exact database port. Any other access attempt is dropped before it arrives.
+The data subnet has no internet route — inbound or outbound. Both application servers connect to a single RDS DNS endpoint provided by AWS. The RDS service handles routing internally and promotes the standby automatically on failover — the application never needs to change its connection string.
+
+A **DB Subnet Group** containing both isolated subnets is required to enable Multi-AZ on RDS. This tells AWS which subnets are eligible for placing the primary and standby instances.
 
 ---
 
@@ -57,6 +61,10 @@ The three subnet types aren't aesthetic choices — each has a different route t
 - Isolated: no default route — traffic stays within the VPC
 
 This means compromising a web server doesn't give direct access to the database. An attacker still has to get past the internal ALB and the app tier's Security Group.
+
+### One NAT Gateway per AZ
+
+A single NAT Gateway creates a hidden single point of failure at the network level. If AZ-A goes down and your only NAT Gateway is there, app servers in AZ-B lose outbound connectivity even though the AZ itself is healthy. Each AZ has its own NAT Gateway so availability is truly independent.
 
 ### Security Groups as control layers
 
@@ -95,7 +103,9 @@ No rule uses `0.0.0.0/0` beyond the external ALB. Each resource only talks to wh
 
 Every tier is distributed across two Availability Zones. A complete AZ failure won't take down the service — ALBs detect unavailability via health checks and reroute traffic automatically.
 
-RDS Multi-AZ replicates transactions synchronously to the standby instance. Failover is automatic and takes around 1–2 minutes with no manual intervention.
+Each AZ has its own NAT Gateway, so outbound connectivity in one AZ is never dependent on infrastructure in the other.
+
+RDS Multi-AZ replicates transactions synchronously to the standby instance. Both app servers connect through a single DNS endpoint — AWS handles failover automatically in around 1–2 minutes with no changes needed on the application side.
 
 ---
 
@@ -103,20 +113,23 @@ RDS Multi-AZ replicates transactions synchronously to the standby instance. Fail
 
 1. Create the VPC (`10.0.0.0/16`) with DNS hostnames enabled
 2. Create the 6 subnets distributed across two AZs
-3. Create and attach the Internet Gateway
-4. Create the NAT Gateway in a public subnet with an Elastic IP
-5. Configure separate route tables for each subnet type
-6. Create the Security Groups following the rules above
-7. Launch EC2 instances in their corresponding subnets
-8. Create the external and internal ALBs with Target Groups
-9. Create the RDS instance with Multi-AZ enabled in the isolated subnet group
-10. Enable CloudTrail, GuardDuty, and attach WAF to the external ALB
+3. Create and attach the Internet Gateway to the VPC boundary
+4. Create one NAT Gateway per AZ, each in its respective public subnet with an Elastic IP
+5. Configure separate route tables for each subnet type — private subnets route to their own AZ's NAT Gateway
+6. Create a **DB Subnet Group** with both isolated subnets
+7. Create the Security Groups following the rules above
+8. Launch EC2 instances in their corresponding subnets
+9. Create the external and internal ALBs with Target Groups
+10. Create the RDS instance with Multi-AZ enabled using the DB Subnet Group
+11. Enable CloudTrail, GuardDuty, and attach WAF to the external ALB
 
 ---
 
 ## What I Actually Learned
 
 The biggest surprise was realizing the subnet name means nothing — what actually makes a subnet public or private is its route table. You can label something "public" and forget to add the IGW route, and it stays completely isolated. That shifts how you think about network control entirely.
+
+One NAT Gateway seems like enough until you realize it creates a silent dependency between AZs. High availability isn't just about compute — the network layer needs to be redundant too.
 
 The other insight: referencing Security Groups by ID instead of CIDR is far more reliable. When an instance gets replaced, the rule still holds — no manual updates needed.
 
